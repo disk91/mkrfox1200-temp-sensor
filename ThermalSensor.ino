@@ -3,17 +3,25 @@
 #include <ZSharpIR.h>
 #include <ArduinoLowPower.h>
 #include <SigFox.h>
+#include <SPI.h>
+#include <MFRC522.h>
 
-Adafruit_MLX90614 mlx = Adafruit_MLX90614();
-ZSharpIR ZSharpIR(A1, 20150);
 
-#define DISTPIN 2
-#define REDLEDPIN 5
-#define GREENLEDPIN 6
+#define DISTPIN     1
+#define REDLEDPIN   5
+#define GREENLEDPIN 7
+#define RFID_SS     3
+#define RFID_RST    4
+#define BUZZ_PIN    2
 
 #define DIST_MIN 290
 #define DIST_MAX 350
 #define DIST_OUT 450
+
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+ZSharpIR ZSharpIR(A1, 20150);
+MFRC522 rfid(RFID_SS,RFID_RST);
+MFRC522::MIFARE_Key key; 
 
 typedef enum {
    WAITFORSOMEONE = 0,
@@ -48,6 +56,9 @@ void setup() {
   SigFox.debug();
   Serial.print("SIGFOX ID= 0x");
   Serial.println(SigFox.ID());
+
+  SPI.begin();
+  rfid.PCD_Init();
 }
 
 typedef struct __attribute__ ((packed)) sigfox_message {
@@ -60,7 +71,22 @@ void loop() {
   int distance, dmin, dmax;
   int sleepTime = 800;
   float envTemp, objTemp;
+  static uint64_t rfidId = 0;
   SigfoxMessage msg;
+
+  // Read the card is present and update the corresponding variable
+  if ( rfid.PICC_IsNewCardPresent() ) {
+     if(rfid.PICC_ReadCardSerial()) {
+        pinMode(BUZZ_PIN, OUTPUT);
+        tone(BUZZ_PIN,2000);
+        delay(200);
+        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+        for (byte i = 0; i < rfid.uid.size; ++i) { 
+          rfidId <<= 8;
+          rfidId |= rfid.uid.uidByte[i];
+        }
+     }
+  }
   
   switch(curentState) {
     case WAITFORSOMEONE:
@@ -98,6 +124,7 @@ void loop() {
       if ( dmin > DIST_MIN && dmax < DIST_MAX ) {
         curentState = GOODDISTANCE;
       } else if ( dmin > DIST_OUT ) {
+        rfidId = 0;
         curentState = WAITFORSOMEONE;
       } else {
         sleepTime = 50;
@@ -122,9 +149,16 @@ void loop() {
       break;
 
     case DISTANCESTABLE:
+      // switch IR down to not pertubate measure
+      digitalWrite(DISTPIN,LOW);
+      delay(100);
       digitalWrite(GREENLEDPIN,LOW);
+      // Get measure
       envTemp = mlx.readAmbientTempC();
       objTemp = mlx.readObjectTempC();
+      // Verify distance
+      digitalWrite(DISTPIN,HIGH);
+      delay(100);
       distance=ZSharpIR.distance();
       if ( distance > DIST_MIN && distance < DIST_MAX ) {
         // reading sounds valid
@@ -132,16 +166,15 @@ void loop() {
         Serial.print("*C Object = "); Serial.print(objTemp); Serial.println("*C");
         curentState = WAITFORLEAVING;
         digitalWrite(GREENLEDPIN,HIGH);
-        sleepTime = 3000; // + about 7 seconds for Sigfox message
         digitalWrite(DISTPIN,LOW);
         // send the message
         msg.envTemp = (int16_t)(envTemp*100);
         msg.objTemp = (int16_t)(objTemp*100);
-        msg.nfcId = 0;
+        msg.nfcId = rfidId;
         SigFox.beginPacket();
         SigFox.write((uint8_t*)&msg,sizeof(msg));
         SigFox.endPacket(false);
-        digitalWrite(GREENLEDPIN,HIGH);
+        sleepTime = 5000; // + about 7 seconds for Sigfox message
       } else {
         curentState = SOMEONEHERE;
         sleepTime = 1000;
@@ -149,6 +182,7 @@ void loop() {
       break;
       
     case WAITFORLEAVING:
+      rfidId=0;
       digitalWrite(DISTPIN,HIGH);
       delay(100);
       distance=ZSharpIR.distance();
