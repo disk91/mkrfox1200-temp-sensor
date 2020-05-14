@@ -1,10 +1,27 @@
 #include <Wire.h>
 #include <Adafruit_MLX90614.h>
-#include <ZSharpIR.h>
-#include <ArduinoLowPower.h>
 #include <SigFox.h>
 #include <SPI.h>
 #include <MFRC522.h>
+
+//#define WITHSHARPIR
+#define WITH_VL53L0X
+
+#ifdef WITH_VL53L0X
+  #include <VL53L0X.h>
+  VL53L0X vl53l0x;
+  #define DIST_MIN    50
+  #define DIST_MAX    65
+  #define DIST_OUT   300
+  #define DIST_LOOPS   4
+#elif defined WITH_SHARPIR
+  #include <ZSharpIR.h>
+  ZSharpIR ZSharpIR(A1, 20150);
+  #define DIST_MIN  290
+  #define DIST_MAX  350
+  #define DIST_OUT  450
+  #define DIST_LOOPS 10
+#endif
 
 
 #define DISTPIN     1
@@ -14,14 +31,11 @@
 #define RFID_RST    4
 #define BUZZ_PIN    2
 
-#define DIST_MIN 290
-#define DIST_MAX 350
-#define DIST_OUT 450
 
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
-ZSharpIR ZSharpIR(A1, 20150);
 MFRC522 rfid(RFID_SS,RFID_RST);
 MFRC522::MIFARE_Key key; 
+
 
 typedef enum {
    WAITFORSOMEONE = 0,
@@ -37,11 +51,14 @@ void setup() {
   // for easy reprogramming after manual reset because of low power mode
   //  you can also double click on reset button at anytime to restart on bootloader
   delay(4000);
+  Wire.begin();
   
   // Setup
   Serial.begin(9600);
   mlx.begin();
-  ZSharpIR.setARefVoltage(3300);
+  #ifdef WITH_SHARPIR
+    ZSharpIR.setARefVoltage(3300);
+  #endif 
   pinMode(DISTPIN,OUTPUT);
   digitalWrite(DISTPIN,LOW);
   pinMode(REDLEDPIN,OUTPUT);
@@ -66,6 +83,26 @@ int16_t envTemp;
 int16_t objTemp;
 uint64_t nfcId;
 } SigfoxMessage;
+
+/* distance in milimeter
+ *  
+ */
+uint16_t getDistance() {
+#ifdef WITH_VL53L0X
+  digitalWrite(DISTPIN,HIGH);
+  vl53l0x.setTimeout(500);
+  if ( !vl53l0x.init() ) {
+    Serial.println("Error init VL53L0X");
+  }
+  vl53l0x.setMeasurementTimingBudget(100000);
+  uint16_t d = vl53l0x.readRangeSingleMillimeters();
+  digitalWrite(DISTPIN,LOW);
+  return d;
+#elif defined WITH_SHARPIR
+  return ZSharpIR.distance();
+#endif
+}
+
 
 void loop() {
   int distance, dmin, dmax;
@@ -94,7 +131,7 @@ void loop() {
       digitalWrite(REDLEDPIN,HIGH);
       delay(100);
       digitalWrite(REDLEDPIN,LOW);
-      distance=ZSharpIR.distance();
+      distance=getDistance();
       //Serial.print("Distance = "); Serial.println(distance);
       if ( distance < DIST_OUT ) {
         curentState = SOMEONEHERE;
@@ -110,17 +147,17 @@ void loop() {
       // wait for the right distance and stability
       dmin = 1000;
       dmax = 0;
-      for ( int i = 0 ; i < 10 ; i++ ) {
+      for ( int i = 0 ; i < DIST_LOOPS ; i++ ) {
         digitalWrite(GREENLEDPIN,HIGH);
         delay(50);
         digitalWrite(GREENLEDPIN,LOW);
-        distance=ZSharpIR.distance();
+        distance=getDistance();
         if ( distance < dmin ) dmin = distance;
         if ( distance > dmax ) dmax = distance;
         delay(50);
       }
       sleepTime = 0;
-      //Serial.print("dmin: ");Serial.print(dmin); Serial.print("dmax: ");Serial.print(dmax);Serial.println("");
+      Serial.print("dmin: ");Serial.print(dmin); Serial.print("dmax: ");Serial.print(dmax);Serial.println("");
       if ( dmin > DIST_MIN && dmax < DIST_MAX ) {
         curentState = GOODDISTANCE;
       } else if ( dmin > DIST_OUT ) {
@@ -139,7 +176,7 @@ void loop() {
         digitalWrite(GREENLEDPIN,LOW);        
         delay(250);
       }
-      distance=ZSharpIR.distance();
+      distance=getDistance();
       if ( distance > DIST_MIN && distance < DIST_MAX ) {
         curentState = DISTANCESTABLE;
       } else {
@@ -159,11 +196,22 @@ void loop() {
       // Verify distance
       digitalWrite(DISTPIN,HIGH);
       delay(100);
-      distance=ZSharpIR.distance();
+      distance=getDistance();
       if ( distance > DIST_MIN && distance < DIST_MAX ) {
         // reading sounds valid
         Serial.print("Ambient = "); Serial.print(envTemp); 
         Serial.print("*C Object = "); Serial.print(objTemp); Serial.println("*C");
+        
+        pinMode(BUZZ_PIN, OUTPUT);
+        tone(BUZZ_PIN,1000);
+        delay(200);
+        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+        delay(200);
+        pinMode(BUZZ_PIN, OUTPUT);
+        tone(BUZZ_PIN,1000);
+        delay(200);
+        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+        
         curentState = WAITFORLEAVING;
         digitalWrite(GREENLEDPIN,HIGH);
         digitalWrite(DISTPIN,LOW);
@@ -185,7 +233,7 @@ void loop() {
       rfidId=0;
       digitalWrite(DISTPIN,HIGH);
       delay(100);
-      distance=ZSharpIR.distance();
+      distance=getDistance();
       digitalWrite(DISTPIN,LOW);
       if ( distance > DIST_OUT ) {
         digitalWrite(GREENLEDPIN,LOW);
@@ -203,7 +251,6 @@ void loop() {
 
   if ( sleepTime > 0 ) {
      delay(sleepTime);
-     //LowPower.sleep(sleepTime); -- still buggy unfortunatelly
   }
 
 }
