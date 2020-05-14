@@ -6,12 +6,13 @@
 
 //#define WITHSHARPIR
 #define WITH_VL53L0X
+#define WITH_SIGFOX_TX
 
 #ifdef WITH_VL53L0X
   #include <VL53L0X.h>
   VL53L0X vl53l0x;
-  #define DIST_MIN    50
-  #define DIST_MAX    65
+  #define DIST_MIN    30
+  #define DIST_MAX    40
   #define DIST_OUT   300
   #define DIST_LOOPS   4
 #elif defined WITH_SHARPIR
@@ -103,6 +104,13 @@ uint16_t getDistance() {
 #endif
 }
 
+void getBuz(int freq, int durMs) {
+   pinMode(BUZZ_PIN, OUTPUT);
+   tone(BUZZ_PIN,freq);
+   delay(durMs);
+   pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+}
+
 
 void loop() {
   int distance, dmin, dmax;
@@ -114,10 +122,7 @@ void loop() {
   // Read the card is present and update the corresponding variable
   if ( rfid.PICC_IsNewCardPresent() ) {
      if(rfid.PICC_ReadCardSerial()) {
-        pinMode(BUZZ_PIN, OUTPUT);
-        tone(BUZZ_PIN,2000);
-        delay(200);
-        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+        getBuz(2000,200);
         for (byte i = 0; i < rfid.uid.size; ++i) { 
           rfidId <<= 8;
           rfidId |= rfid.uid.uidByte[i];
@@ -164,12 +169,16 @@ void loop() {
         rfidId = 0;
         curentState = WAITFORSOMEONE;
       } else {
+        if ( dmin < DIST_MIN ) {
+           getBuz(500,300);
+        }
         sleepTime = 50;
       }
       break;
 
     case GOODDISTANCE:
       // ensure stability
+      getBuz(3000,100);
       for ( int i = 0 ; i < 2 ; i++ ) {
         digitalWrite(GREENLEDPIN,HIGH);
         delay(250);
@@ -192,37 +201,40 @@ void loop() {
       digitalWrite(GREENLEDPIN,LOW);
       // Get measure
       envTemp = mlx.readAmbientTempC();
-      objTemp = mlx.readObjectTempC();
+      objTemp = 0;
+      for (int i= 0; i<4 ; i++) {
+        objTemp += mlx.readObjectTempC();
+      }
+      objTemp /= 4.0;
       // Verify distance
       digitalWrite(DISTPIN,HIGH);
       delay(100);
       distance=getDistance();
+      Serial.print("Dist = ");Serial.print(distance);
       if ( distance > DIST_MIN && distance < DIST_MAX ) {
         // reading sounds valid
-        Serial.print("Ambient = "); Serial.print(envTemp); 
+        Serial.print("mm Ambient = "); Serial.print(envTemp); 
         Serial.print("*C Object = "); Serial.print(objTemp); Serial.println("*C");
         
-        pinMode(BUZZ_PIN, OUTPUT);
-        tone(BUZZ_PIN,1000);
+        getBuz(1000,200);
         delay(200);
-        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
-        delay(200);
-        pinMode(BUZZ_PIN, OUTPUT);
-        tone(BUZZ_PIN,1000);
-        delay(200);
-        pinMode(BUZZ_PIN, INPUT); // because noTone seems to be ineficient
+        getBuz(1000,200);
         
         curentState = WAITFORLEAVING;
         digitalWrite(GREENLEDPIN,HIGH);
         digitalWrite(DISTPIN,LOW);
         // send the message
-        msg.envTemp = (int16_t)(envTemp*100);
-        msg.objTemp = (int16_t)(objTemp*100);
-        msg.nfcId = rfidId;
-        SigFox.beginPacket();
-        SigFox.write((uint8_t*)&msg,sizeof(msg));
-        SigFox.endPacket(false);
-        sleepTime = 5000; // + about 7 seconds for Sigfox message
+        #ifdef WITH_SIGFOX_TX
+          msg.envTemp = (int16_t)(envTemp*100);
+          msg.objTemp = (int16_t)(objTemp*100);
+          msg.nfcId = rfidId;
+          SigFox.beginPacket();
+          SigFox.write((uint8_t*)&msg,sizeof(msg));
+          SigFox.endPacket(false);
+          sleepTime = 5000; // + about 7 seconds for Sigfox message
+        #else
+          sleepTime = 12000;
+        #endif
       } else {
         curentState = SOMEONEHERE;
         sleepTime = 1000;
